@@ -201,8 +201,8 @@ static std::string hzText(float hz) {
     return hz < 1000.f ? string::f("%.1f Hz %s%d", hz, nn[n], oct) : string::f("%.2fk %s%d", hz / 1000.f, nn[n], oct);
 }
 
-// the OLED: mode (big) + the sweep / flutter line, Hz + note of voice 1 (right), one cycle of the wave (left, a dot where
-// a restart starts it) and the envelope shape (right, a dot riding it; segment widths follow the log of their times)
+// the OLED: mode (big) + the sweep / flutter line, Hz + note of voice 1 (right), one cycle of the wave (left, a dot riding
+// voice 1's oscillator; idle: where a restart starts it) and the envelope shape (right, a dot riding it; segment widths follow the log of their times)
 struct PulseDisplay : TransparentWidget {
     Pulse* m = NULL;
     void drawLayer(const DrawArgs& args, int layer) override {
@@ -232,7 +232,10 @@ struct PulseDisplay : TransparentWidget {
             if (i == 0) nvgMoveTo(vg, x, y); else nvgLineTo(vg, x, y);
         }
         nvgStrokeColor(vg, oled::amber()); nvgStrokeWidth(vg, 1.1f); nvgStroke(vg);
+        // the dot rides the running oscillator (voice 1), like the envelope's dot (Nov 16 2026, Nick: "little ball doesn't
+        // move on the wave readout, the ADSR one does"); idle (LOOP / 1-SHOT between hits) it rests where a restart starts
         float ps = pulse::wrap01(P.phaseDeg / 360.f);
+        if (m && (P.mode == pulse::FREE || m->voices[0].stage != 0)) ps = pulse::wrap01(m->voices[0].ph);
         nvgBeginPath(vg);
         nvgCircle(vg, x0 + (x1 - x0) * ps, mid - amp * pulse::morphWave(P.wave, ps, 0.f), 1.8f);
         nvgFillColor(vg, oled::litFill()); nvgFill(vg);

@@ -2,6 +2,7 @@
 
 A free VCV Rack 2 plugin by **NoiZee ToyZ** (part of the SynTHBloK series).
 
+![PULSE](images/Pulse.png)
 
 | Module | What it does |
 |---|---|
