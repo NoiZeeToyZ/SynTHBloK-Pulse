@@ -16,6 +16,29 @@ namespace {
 
 static const char* kModeNames[3] = {"FREE", "LOOP", "1-SHOT"};
 
+// V/OCT tuning (Nick, Nov 26 2026: "make this user friendly so it's automatic"). With a cable in V/OCT:
+//   OCTAVE (new modules) = TUNE only picks the octave: 0 V plays the C nearest TUNE, so notes match their names;
+//   SEMI = TUNE snaps to the nearest semitone (transpose in steps); FREE = TUNE as set (patches saved before this).
+namespace pulsetune {
+static const float kC4 = 261.6256f;
+enum { FREE = 0, OCTAVE = 1, SEMI = 2 };
+inline float snap(float hz, int mode) {
+    if (mode == OCTAVE) return kC4 * std::pow(2.f, std::round(std::log2(hz / kC4)));
+    if (mode == SEMI) return kC4 * std::pow(2.f, std::round(12.f * std::log2(hz / kC4)) / 12.f);
+    return hz;
+}
+inline std::string note(float hz) {
+    static const char* nn[12] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
+    int midi = (int) std::round(69.f + 12.f * std::log2(hz / 440.f));
+    int n = ((midi % 12) + 12) % 12, oct = (int) std::floor(midi / 12.f) - 1;
+    return string::f("%s%d", nn[n], oct);
+}
+}  // namespace pulsetune
+
+struct PulseTuneQuantity : ParamQuantity {
+    std::string getString() override;   // says which note plays at 0 V while auto-tune is on
+};
+
 struct Pulse : Module {
     enum ParamId {
         MODE_PARAM, TRIG_PARAM, TUNE_PARAM, WAVE_PARAM, PHASE_PARAM, LEVEL_PARAM, SWEEP_PARAM, SWEEPTIME_PARAM,
@@ -37,12 +60,13 @@ struct Pulse : Module {
     int preset = -1;
     float trigFlash = 0.f;     // the TRIG key lights for 60 ms on every trigger (display only)
     float shownHz = 38.f;      // voice 1, for the display
+    int vtune = pulsetune::OCTAVE;   // V/OCT tuning; patches saved before Nov 26 2026 load FREE (sound unchanged)
 
     Pulse() {
         config(NUM_PARAMS, NUM_INPUTS, NUM_OUTPUTS, 0);
         configSwitch(MODE_PARAM, 0.f, 2.f, 2.f, "Mode", {"FREE (free-running LFO, VCA open)", "LOOP (the envelope cycles by itself)", "1-SHOT (TRIG = A-D-R, GATE = ADSR)"});
         configButton(TRIG_PARAM, "Trigger (all voices)");
-        configParam(TUNE_PARAM, std::log2(0.01f), std::log2(8000.f), std::log2(38.f), "Tune", " Hz", 2.f);
+        configParam<PulseTuneQuantity>(TUNE_PARAM, std::log2(0.01f), std::log2(8000.f), std::log2(38.f), "Tune", " Hz", 2.f);
         configParam(WAVE_PARAM, 0.f, 3.f, 0.f, "Wave", "", 0.f, 1.f);
         configParam(PHASE_PARAM, 0.f, 360.f, 90.f, "Phase", " deg");
         configParam(LEVEL_PARAM, 0.f, 4.f, 1.f, "Level", "x");
@@ -85,7 +109,9 @@ struct Pulse : Module {
     static float t2(float v) { return std::pow(2.f, v); }
     void readParams() {
         P.mode = (int) std::round(params[MODE_PARAM].getValue());
-        P.tuneHz = t2(params[TUNE_PARAM].getValue());
+        float hz = t2(params[TUNE_PARAM].getValue());
+        if (vtune != pulsetune::FREE && inputs[VOCT_INPUT].isConnected()) hz = pulsetune::snap(hz, vtune);
+        P.tuneHz = hz;
         P.wave = params[WAVE_PARAM].getValue();
         P.phaseDeg = params[PHASE_PARAM].getValue();
         P.level = params[LEVEL_PARAM].getValue();
@@ -172,11 +198,14 @@ struct Pulse : Module {
     json_t* dataToJson() override {
         json_t* r = json_object();
         json_object_set_new(r, "preset", json_integer(preset));
+        json_object_set_new(r, "vtune", json_integer(vtune));
         return r;
     }
     // "preset": n also APPLIES that preset when the patch data asks for it ("apply": true; for RANDROYD, like GRIT)
     void dataFromJson(json_t* r) override {
         if (json_t* j = json_object_get(r, "preset")) preset = (int) json_integer_value(j);
+        json_t* vt = json_object_get(r, "vtune");   // absent = saved before auto-tune existed: keep it as it was
+        vtune = vt ? clamp((int) json_integer_value(vt), 0, 2) : (int) pulsetune::FREE;
         if (json_t* a = json_object_get(r, "apply")) if (json_is_true(a)) applyPreset(preset);
     }
 };
@@ -190,6 +219,16 @@ inline void gText(NVGcontext* vg, float x, float y, float size, NVGcolor c, int 
     nvgTextAlign(vg, align);
     nvgFillColor(vg, c);
     nvgText(vg, x, y, t.c_str(), NULL);
+}
+
+std::string PulseTuneQuantity::getString() {
+    Pulse* m = dynamic_cast<Pulse*>(module);
+    if (m && m->vtune != pulsetune::FREE && m->inputs[Pulse::VOCT_INPUT].isConnected()) {
+        float s = pulsetune::snap(std::pow(2.f, getValue()), m->vtune);
+        return string::f("Tune: %s at 0 V (%.2f Hz), V/OCT auto-tune %s", pulsetune::note(s).c_str(), s,
+                         m->vtune == pulsetune::OCTAVE ? "(octave)" : "(nearest note)");
+    }
+    return ParamQuantity::getString();
 }
 
 static std::string hzText(float hz) {
@@ -371,6 +410,10 @@ struct PulseWidget : ModuleWidget {
             for (int i = 0; i < pulse::kNumPresets; i++)
                 sub->addChild(createCheckMenuItem(pulse::presetName(i), "", [=]() { return m->preset == i; }, [=]() { m->applyPreset(i); }));
         }));
+        menu->addChild(createIndexSubmenuItem("V/OCT tuning",
+            {"Off: TUNE exactly as set", "Auto: TUNE picks the octave, 0 V = C (notes match their names)",
+             "Auto: TUNE snaps to the nearest note"},
+            [=]() { return m->vtune; }, [=](int i) { m->vtune = i; }));
     }
     void draw(const DrawArgs& args) override {
         NVGcontext* vg = args.vg;
